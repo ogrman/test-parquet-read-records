@@ -1,0 +1,9 @@
+[package]
+name = "parquet-bug"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+parquet = "49.0.0"
