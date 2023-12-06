@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use bytes::{BufMut, Bytes, BytesMut};
 use parquet::{
     basic::Compression,
-    data_type::{ByteArray, ByteArrayType},
+    data_type::ByteArrayType,
     file::{
         properties::WriterProperties, reader::FileReader, serialized_reader::SerializedFileReader,
         writer::SerializedFileWriter,
@@ -14,51 +14,6 @@ use parquet::{
 
 pub fn parse_schema(schema: &str) -> parquet::schema::types::Type {
     parse_message_type(schema).expect("Bad schema")
-}
-
-#[derive(Debug, Default)]
-pub struct RepeatedWriter {
-    values: Vec<ByteArray>,
-    def_levels: Vec<i16>,
-    rep_levels: Vec<i16>,
-}
-
-impl RepeatedWriter {
-    fn new() -> Self {
-        RepeatedWriter {
-            values: Default::default(),
-            def_levels: Default::default(),
-            rep_levels: Default::default(),
-        }
-    }
-
-    fn push<Iter: ExactSizeIterator<Item = T>, T>(&mut self, values: Iter)
-    where
-        T: Into<ByteArray>,
-    {
-        let num = values.len();
-        if num == 0 {
-            self.def_levels.push(0);
-            self.rep_levels.push(0);
-        } else {
-            self.def_levels.resize(self.def_levels.len() + num, 1);
-            self.rep_levels.push(0);
-            self.rep_levels.resize(self.rep_levels.len() + num - 1, 1);
-            self.values.extend(values.map(|val| val.into()));
-        }
-    }
-
-    fn values(&self) -> &[ByteArray] {
-        &self.values
-    }
-
-    fn def_levels(&self) -> Option<&[i16]> {
-        Some(&self.def_levels)
-    }
-
-    fn rep_levels(&self) -> Option<&[i16]> {
-        Some(&self.rep_levels)
-    }
 }
 
 fn main() -> Result<()> {
@@ -83,7 +38,7 @@ message schema {
         .unwrap(),
     );
 
-    let bytes = create_small_parquet_file(Arc::clone(&schema), Arc::clone(&props))?;
+    let bytes = testdata::create_small_parquet_file(Arc::clone(&schema), Arc::clone(&props))?;
 
     eprintln!("parquet file created: {} bytes", bytes.len());
 
@@ -101,6 +56,8 @@ message schema {
             let row_group_reader = reader.get_row_group(i)?;
             let mut column_group_writer = writer.next_row_group()?;
 
+            eprintln!("reader: reading row group {i}");
+
             for j in 0..row_group_reader.num_columns() {
                 let mut column_reader = row_group_reader.get_column_reader(j)?;
 
@@ -109,6 +66,8 @@ message schema {
                     .expect("Expected the writer to have the same number of columns as the reader");
 
                 let typed_column_writer = column_writer.typed::<ByteArrayType>();
+
+                eprintln!("reader: reading column {j}");
 
                 loop {
                     let (total_records_read, values_read, levels_read) = match &mut column_reader {
@@ -154,42 +113,98 @@ message schema {
     Ok(())
 }
 
-fn create_small_parquet_file(
-    schema: Arc<parquet::schema::types::Type>,
-    props: Arc<WriterProperties>,
-) -> Result<Bytes> {
-    let mut writer = SerializedFileWriter::new(BytesMut::new().writer(), schema, props)?;
+mod testdata {
+    use std::sync::Arc;
 
-    {
-        let mut row_group_writer = writer.next_row_group()?;
+    use anyhow::{anyhow, Result};
+    use bytes::{BufMut, Bytes, BytesMut};
+    use parquet::{
+        data_type::{ByteArray, ByteArrayType},
+        file::{properties::WriterProperties, writer::SerializedFileWriter},
+    };
 
-        let mut column_writer = row_group_writer
-            .next_column()?
-            .ok_or(anyhow!("No column"))?;
+    pub fn create_small_parquet_file(
+        schema: Arc<parquet::schema::types::Type>,
+        props: Arc<WriterProperties>,
+    ) -> Result<Bytes> {
+        let mut writer = SerializedFileWriter::new(BytesMut::new().writer(), schema, props)?;
 
-        let typed = column_writer.typed::<ByteArrayType>();
+        {
+            let mut row_group_writer = writer.next_row_group()?;
 
-        let mut repeated_writer = RepeatedWriter::new();
+            let mut column_writer = row_group_writer
+                .next_column()?
+                .ok_or(anyhow!("No column"))?;
 
-        repeated_writer.push(names(4).into_iter());
-        repeated_writer.push(names(4).into_iter());
+            let typed = column_writer.typed::<ByteArrayType>();
 
-        let _ = typed.write_batch(
-            repeated_writer.values(),
-            repeated_writer.def_levels(),
-            repeated_writer.rep_levels(),
-        )?;
+            let mut repeated_writer = RepeatedWriter::new();
 
-        column_writer.close()?;
+            repeated_writer.push(names(4).into_iter());
+            repeated_writer.push(names(4).into_iter());
 
-        row_group_writer.close()?;
+            let _ = typed.write_batch(
+                repeated_writer.values(),
+                repeated_writer.def_levels(),
+                repeated_writer.rep_levels(),
+            )?;
+
+            column_writer.close()?;
+
+            row_group_writer.close()?;
+        }
+
+        Ok(Bytes::from(writer.into_inner()?.into_inner()))
     }
 
-    Ok(Bytes::from(writer.into_inner()?.into_inner()))
-}
+    #[derive(Debug, Default)]
+    pub struct RepeatedWriter {
+        values: Vec<ByteArray>,
+        def_levels: Vec<i16>,
+        rep_levels: Vec<i16>,
+    }
 
-fn names(count: usize) -> Vec<Vec<u8>> {
-    (0..count)
-        .map(|i| format!("Name {i}").into_bytes())
-        .collect()
+    impl RepeatedWriter {
+        fn new() -> Self {
+            RepeatedWriter {
+                values: Default::default(),
+                def_levels: Default::default(),
+                rep_levels: Default::default(),
+            }
+        }
+
+        fn push<Iter: ExactSizeIterator<Item = T>, T>(&mut self, values: Iter)
+        where
+            T: Into<ByteArray>,
+        {
+            let num = values.len();
+            if num == 0 {
+                self.def_levels.push(0);
+                self.rep_levels.push(0);
+            } else {
+                self.def_levels.resize(self.def_levels.len() + num, 1);
+                self.rep_levels.push(0);
+                self.rep_levels.resize(self.rep_levels.len() + num - 1, 1);
+                self.values.extend(values.map(|val| val.into()));
+            }
+        }
+
+        fn values(&self) -> &[ByteArray] {
+            &self.values
+        }
+
+        fn def_levels(&self) -> Option<&[i16]> {
+            Some(&self.def_levels)
+        }
+
+        fn rep_levels(&self) -> Option<&[i16]> {
+            Some(&self.rep_levels)
+        }
+    }
+
+    fn names(count: usize) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|i| format!("Name {i}").into_bytes())
+            .collect()
+    }
 }
